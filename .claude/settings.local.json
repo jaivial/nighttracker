@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/.claude/**)",
+      "Read(//root/.factory/**)"
+    ]
+  }
+}
