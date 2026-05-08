@@ -1,321 +1,834 @@
-# Kraken — Project Rules (Hermes)
+# Claude Code Rules
 
-> Hermes-native project rules for MythKraken. Routing, invariants, and always-on enforcement.
-> Skills live at `~/.hermes/skills/`, profiles at `~/.hermes/profiles/`. See `AGENTS.md` for the full catalogue.
-> `CLAUDE.md` is kept identical for Claude Code compatibility — both files share the same rules.
+## 0. TDD Approach (Mandatory)
 
----
+Always follow Test-Driven Development when implementing features or fixing bugs:
 
-## 0. Talk to me normal — chill, no fancy words
+1. **Write failing tests first** - Before writing any code, write tests that describe the expected behavior
+2. **Run tests** - Verify tests fail as expected
+3. **Implement the code** - Write the minimum code needed to make tests pass
+4. **Run tests again** - Verify all tests pass
+5. **Refactor if needed** - Clean up code while keeping tests passing
+6. **Never mark a task complete until all tests pass**
 
-How you write back to me:
-
-- **Talk casual, like a friend.** Skip the corporate / docs voice. "yeah, that's broken because..." beats "the underlying issue is...".
-- **Plain words, not techie words.** When you can swap a fancy term for a normal one, do it.
-  - "the function pulls data from the server" → "the function grabs the data from the backend"
-  - "instantiate the component" → "drop the component in"
-  - "the request is failing because of a CORS misconfiguration" → "the request is failing 'cause CORS isn't set up right"
-- **Short and direct.** Don't pad. Don't write 4 sentences when 1 works.
-- **Use examples instead of explaining.** Show me, don't lecture.
-- **It's okay to say "this is dumb" or "this is gonna suck" or "easy fix"** — natural reactions, not buzzwords.
-- **Keep the technical stuff accurate** — I want simple wording, not wrong info. If a term truly has no good casual swap (e.g. `useEffect`, `SignalR`, `Jotai atom`), use it — but explain in plain words next to it the first time.
-- **No "as an AI..." preambles.** Skip.
-- **Bullet lists and short paragraphs** beat long ones.
-
-The vibe: like asking a senior dev next to you in a bar what's going on. Not a doc. Not a tutorial. Real talk.
-
-This style applies to **chat replies and explanations**. It does NOT apply to:
-- Code (write it normal — clean, idiomatic)
-- Commit messages (still proper imperative-mood — "fix bug", "add endpoint")
-- File contents like SKILL.md, agent prompts, INDEX.md (those are docs — keep professional)
-- PR descriptions (proper, but can be relaxed)
+**Important:** Tests should be written in a separate test file following the project conventions (e.g., `.test.ts`, `.spec.ts`, `*.test.tsx`).
 
 ---
 
-## Task Intake (always runs before anything else)
+## 0.1 Git Branching & Pull Request Workflow (Mandatory)
 
-**Every task the user describes in this session MUST become a Kanban card before any work starts.**
+This rule governs **how every code change lands in git** in this monorepo. It is **not optional**, overrides any older guidance below, and applies to every agent, skill, and ad-hoc edit.
 
-Before executing ANY task described by the user (bug report, feature request, refactor, investigation):
-1. `kanban_create()` — title = short summary of the task, body = full description
-2. Then proceed with routing, decomposition, and execution
+This monorepo contains **two independent git repositories**:
 
-**Exception:** Clarifying questions ("can we do X?"), conversational replies, and "just checking" queries do NOT need a card.
+| Repo                                | Path                          | GitHub remote                                |
+|-------------------------------------|-------------------------------|----------------------------------------------|
+| Frontend (`MythKraken.Dashboard`)   | `/var/www/kraken/Dashboard`   | `Myth-Developers/MythKraken.Dashboard`       |
+| Backend  (`MythKraken.Backend`)     | `/var/www/kraken/Backend`     | `Myth-Developers/MythKraken.Backend`         |
 
-**Why:** A card on kanban.menustudioai.com gives the task a permanent audit trail, enables dependency tracking, unblocks parallel workers, and lets `task-ingestion` sync status back to external sources (Discord, Notion, Linear).
+**Before staging or committing anything**, identify which repo the file lives in (`git -C <path> rev-parse --show-toplevel`) and apply the matching policy below. Frontend and Backend are different repos with different histories — treat them as two parallel pipelines.
 
----
+### Frontend (Dashboard) — commit directly, no PR required
 
-## 1. Routing — pick the right tool
+- Allowed **only** when the current Dashboard branch matches the pattern `dev-week<N>-<month>` (e.g., `dev-week1-may`, `dev-week3-jun`).
+- On a matching branch, frontend commits land directly on it. No feature branch, no PR.
+- If the current branch does **not** match the pattern (e.g., `main`, a release branch, an unrelated feature branch), **STOP** and ask the user how to proceed before editing.
+- The orchestrator's `pr-expert` step is a **no-op** for Dashboard-only tasks on a `dev-week<N>-<month>` branch — it just pushes the branch to `origin`.
 
-For any non-trivial task, follow the pipeline. Detailed step-by-step procedures live inside the skill — invoke it, don't reimplement it here.
+### Backend (`MythKraken.Backend`) — feature branch + PR is MANDATORY
 
-**Hermes profiles** are dispatchable workers at `~/.hermes/profiles/<name>/`. Each profile loads its paired skill. Use the profile name as the dispatch target in `mythkraken-orchestrator` Kanban calls.
+Any change to a file under `/var/www/kraken/Backend` (a.k.a. `MythKraken.Backend/`) **must** land via the following procedure. Direct commits to whatever the current parent branch is are **forbidden** — every change goes through a feature branch and a PR back to the parent.
 
-| Trigger | Hermes Profile / Skill | Notes |
-|---|---|---|
-| Any non-trivial task | `mythkraken-orchestrator` | **Mandatory first step.** Pre-triages, then delegates: research → planner → execute → validate. |
-| Step 1 — context gathering | `kraken-researcher` | First step inside the orchestrator. Uses cached repomix packs via repomix MCP. |
-| Step 2 — plan creation | `kraken-planner` | After researcher. Triages size (trivial / simple / big), emits `phases.json` + `plan.md`. |
-| Step 3.5 — test plan creation | `tdd-vitest-planner` | After kraken-planner. Reads phases.json, emits tests.json with failing tests per phase mapped to a Vitest project. Skips visual / stories / refactor phases (`vitestProject: null`). |
-| Phase 4 inner loop — RED-GREEN-REFACTOR | `tdd-vitest-executor` | Wraps every non-trivial frontend phase. RED writes failing tests + verifies; specialist makes GREEN; conditional REFACTOR on smell detection. Logs to `tdd-cycles.json`. |
-| Backend C#/.NET work | `backend-dev` | Controllers, services, repos, connectors, migrations. |
-| React wiring (entry-point thin shell + shared atoms) | `frontend-react` | NARROWED. Body before return + `src/atoms/*Atom.ts`. No hooks/types/constants/atoms files. |
-| Hook files (`hooks/use*.ts`) | `frontend-hooks` | Pure logic, no JSX. Parallel-safe. |
-| Type files (`types.ts`) | `frontend-types` | Mirrors backend DTOs exactly. Parallel-safe. |
-| Constants (`constants.ts`) | `frontend-constants` | Static values, no functions. Parallel-safe. |
-| Atom components (`atoms/*.tsx`) | `frontend-atoms` | Pure presentational primitives. Parallel-safe. |
-| CSS / Tailwind / visual | `frontend-designer` | Visual layer only — no logic. |
-| Axios / API client | `frontend-endpoints` | Typed contracts, interceptors. |
-| SignalR / real-time | `frontend-websockets` | Hub events, reconnection, `/articlehub`. |
-| i18n / locales (all static text) | `frontend-translator` | **Owned exclusively here** (full handover from `frontend-ux`). |
-| a11y / keyboard / loading-error-empty | `frontend-ux` | No longer covers i18n. |
-| Storybook (`*.stories.tsx`, HMR, Vite) | `frontend-storybook` | Wraps `mythkraken-storybook` skill. |
-| New / changed component | `folder-architect` | Atomic-design audit on `*.tsx` create/modify. |
-| New API endpoint | `backend-dev` + `mythkraken-validator` | `[ApiController]` + `[RequireWorkspaceFlag]` + tests. |
-| New Playwright E2E (CI) | `e2e-plan` → `e2e-dev` → `e2e-run` | Real backend fixture; never seeded sessions. `e2e-dev` appends to `TEST_INDEX.md`. |
-| Live flow E2E (real-browser) | `flow-test-builder` → `flow-<name>-validator/auditor` | Files written to `Dashboard/claude/agents/`. Manual UI login mandatory. |
-| Exploratory QA | `e2e-explore` (Mode A) or `dogfood` | Not for CI. |
-| Coverage audit (orchestrator Layer 2) | `e2e-explore --flow <name>` (Mode B) | Reports `EXISTS <path>` or `MISSING`. |
-| Throwaway experiment | `spike` | Not production-ready code. |
-| Task-done gate | `mythkraken-validator` | Phase 5 — full suite + E2E + i18n + folder + acceptance. |
-| Door 1 — light build+lint+tsc | `frontend-first-validator` | After Phase 5. Routes errors to specialists per file-ownership. |
-| Door 2A — live agent-browser tests | `test-flow-orchestrator` | NEW nested orchestrator. Locates or creates flow-test agents; uses external-claude-runner if newly created. |
-| Door 2B — Playwright replay | `e2e-orchestrator` | NEW nested orchestrator. Runs existing spec or creates one from agent-browser trace via e2e-test-101.md. |
-| Door 3 — pre-commit gate | `kraken-pre-commit-validator` | Sanity re-check after Door 2 may have introduced new files. Same procedure as before. |
-| PR creation | `pr-expert` | NEW final step. Cherry-pick task commits onto pr/<slug>, push, gh pr create against $SPRINT_BRANCH. |
-| Background repomix refresh | `repomix-updater` | Auto-spawned post-success. Never blocks. |
-| Failure-recovery email | `/kraken-notify` | After 3rd failed attempt. Mailgun → `HUMAN_EMAIL`, fallback terminal. |
-| Resume after `/compact` | `/kraken-resume` | Picks up incomplete plan from `Dashboard/claude/orchestrator-state/`. |
-| Pre-commit code review (manual) | `requesting-code-review` | Security + quality gates. |
-| Find dead code | `code-rot-scan` → `code-rot-clean` | Per-batch user confirmation required. |
-| External task source → kanban | `task-ingestion` | Bridge & status sync. |
-| Plans before non-trivial work | `writing-plans` or `plan` | Tasks, paths, code snippets. (Used internally by `kraken-planner`.) |
-| Plan execution via subagents | `subagent-driven-development` | 2-stage review. |
-| Debugging | `systematic-debugging`, `python-debugpy`, `node-inspect-debugger` | Root cause first. |
-| data-testid on every HTML element | `frontend-data-testid-checker` | **Mandatory post-write audit.** Every `data-*` attribute must be unique, kebab-case, parent-context prefixed. Check after any frontend file write. |
+> **The backend's parent branch can be ANY branch** — `main`, `dev`, `sprint/may-week1`, `fix/<...>`, `feat/<...>`, etc. The `dev-week<N>-<month>` pattern is **frontend-only**. Do **not** assume or enforce that pattern when working on the Backend; just capture whatever branch the user is on and use it as the PR base.
 
-**Rule of thumb:** if a profile/skill exists for the work, invoke it. Don't reproduce its rules in this file.
+**Procedure (must run BEFORE the first edit to any backend file):**
 
----
+1. **Capture the parent branch** — whatever branch the Backend repo is currently on. This is the branch the PR will target. It is **not** required to match any particular pattern:
+   ```bash
+   PARENT_BRANCH=$(git -C /var/www/kraken/Backend branch --show-current)
+   # PARENT_BRANCH is whatever branch the user is on — could be `main`, `dev`,
+   # `fix/article-batch-workspace-invariant`, `sprint/may-week1`, etc.
+   ```
+   Persist it (e.g., in `state.json.parentBranch` for orchestrator runs, or in your task notes for ad-hoc work) so the PR step can read it later.
 
-## 2. Always-on enforcement
+2. **Create the feature branch** from the parent:
+   ```bash
+   # Naming: <type>/<short-kebab-description>-<YYYYMMDD>
+   #   <type> ∈ { feat, fix, chore, refactor, docs, test }
+   FEATURE_BRANCH="<type>/<short-description>-$(date +%Y%m%d)"
+   git -C /var/www/kraken/Backend checkout -b "$FEATURE_BRANCH"
+   ```
 
-Auto-applied on every task without explicit invocation:
+3. **Implement → test → commit** on the feature branch, following the TDD section (§0) and the Post-Task Error Checking section (§6) of this file. Track every commit SHA — they go in the PR body.
 
-1. **TDD enforced as a Phase-4 inner loop, not a per-specialist convention.** For every non-trivial frontend phase, `tdd-vitest-planner` writes a test plan (Phase 3.5), then `tdd-vitest-executor` writes the failing tests, confirms RED, hands off to the specialist for implementation, confirms GREEN, prompts REFACTOR only when smells are detected. The cycle is logged to `Dashboard/claude/orchestrator-state/<plan-slug>/tdd-cycles.json`. Phases with `vitestProject: null` (pure visual, stories, structural refactor) skip the loop. Authority for the cycle procedure: `tdd-vitest-executor`. Authority for the methodology: `test-driven-development`.
-2. **Validator gate** — `mythkraken-validator` before any task is marked done. Lint + type + build + tests must pass.
-3. **`data-` attribute on every meaningful HTML element** — kebab-case, descriptive, parent-context prefix. **Enforced by `frontend-data-testid-checker`** — invoke after every frontend file write. No two elements in the same component may share the same `data-` value.
-4. **i18n for all static UI text** — never hardcode user-facing strings. Source of truth: `en.json`.
-5. **Folder structure** — `folder-architect` audits atomic-design layout (`atoms/ui/helpers/hooks/components`, `types.ts`, `constants.ts`) after any component change.
-6. **File line limits** — TSX ≤ 800 lines, all other source files ≤ 300 lines.
+4. **Push and open the PR back to the parent branch:**
+   ```bash
+   git -C /var/www/kraken/Backend push -u origin "$FEATURE_BRANCH"
+   gh -R Myth-Developers/MythKraken.Backend pr create \
+     --base "$PARENT_BRANCH" \
+     --head "$FEATURE_BRANCH" \
+     --title "<type>(<scope>): <one-line summary>" \
+     --body-file <pr-body.md>
+   ```
 
----
+5. **Never auto-merge.** The PR is opened for human review only.
 
-## 3. UI Component Rules (Dashboard)
+### Mixed (frontend + backend changes in one task)
 
-Every reusable component in `Dashboard/src/components/...` must satisfy:
+These are two independent repos — handle them as two parallel pipelines:
 
-1. **Folder structure** — own folder named after the component, with `types.ts`, `constants.ts`, `hooks/`, `atoms/`, `helpers/`, `ui/`, `components/` as needed. `folder-architect` audits this on every change.
-2. **Open/Closed via props** — accept `className`, `style`, `data-testid`. Variants and behaviour extended via props, not by editing the source.
-3. **Storybook story is mandatory** — `<Component>.stories.tsx` next to the component. Cover all variants, sizes, states, and edge cases. CSF3 format, `tags: ['autodocs']`.
-4. **`data-` attribute on every meaningful element** — kebab-case, parent-context prefix. **After every write, invoke `frontend-data-testid-checker`** to audit the component for missing or duplicate `data-` attributes.
+- Frontend commits → land directly on the active `dev-week<N>-<month>` branch.
+- Backend commits → land on a NEW feature branch + open a PR to its parent branch.
 
-Storybook conventions, plugin conflicts, and the `react-children-shim` bridge → `mythkraken-storybook`.
+Each repo gets its own PR (or no-PR) per the rules above. Do **not** try to combine them into one branch or one PR — they cannot share history.
+
+### Hard prohibitions
+
+- ❌ Never commit a backend change directly to `main`, `dev-*`, or any long-lived branch. Backend changes always go through a feature branch + PR.
+- ❌ Never force-push any branch. If a history rewrite seems necessary, ask the user.
+- ❌ Never auto-merge a PR. PRs are opened for human review.
+- ❌ Never push to a branch you didn't create unless the user explicitly authorized that branch in the current scope.
+- ❌ Never skip this section to "save time" — the rule applies even for one-line backend fixes.
+
+### How the orchestrator handles this
+
+The `mythkraken-orchestrator` pipeline is repo-aware:
+
+- **Phase 0 (pre-flight):** detect the touched repos from the task scope. For each touched backend repo, run "Capture parent branch + create feature branch" **before Phase 4 (EJECUTAR)**. Persist `parentBranch` and `featureBranch` to `state.json`.
+- **`pr-expert` (final step):**
+  - Dashboard touched, on `dev-week<N>-<month>` → just `git push origin <branch>`. No PR.
+  - Backend touched → open PR with `head=<featureBranch>`, `base=<parentBranch>`. Title: `<type>(<scope>): <summary>`.
+  - Both touched → both pipelines run; one PR per touched repo (Dashboard's may be skipped per the rule above).
+
+If you (Claude) are working **outside the orchestrator** (ad-hoc edits, bug fix, doc tweak), you are still bound by these rules — apply them manually before editing.
 
 ---
 
-## 4. Project invariants (no skill owns these)
+## Specialized Agents (Mandatory Usage)
 
-### Repo layout
+When working on specific domains, you MUST invoke the appropriate specialized agent to get expert guidance:
+
+### 1. UI/UX Design Expert
+
+**When to call**: For any task involving UI design, styling, responsive layouts, CSS, visual components, animations, or user experience improvements.
+
+**Agent**: `ui-ux-designer-expert`
+
+**Examples**:
+- Creating or modifying visual components
+- Working with CSS, Tailwind, or styling libraries
+- Responsive design implementations
+- Color schemes, typography, or visual themes
+- Animations and transitions
+- Layout design and structure
+
+### 2. Senior React Developer (Atoms/Components)
+
+**When to call**: For any React development task, especially those involving component architecture, atomic design, hooks, or state management.
+
+**Agent**: `senior-react-developer`
+
+**Examples**:
+- Creating new React components
+- Implementing hooks or custom hooks
+- Component composition and architecture
+- State management solutions
+- React performance optimization
+- TypeScript with React patterns
+
+### 3. Senior C# Developer
+
+**When to call**: For any task involving C# code, .NET development, backend services, APIs, or C#-specific implementations.
+
+**Agent**: `senior-csharp-developer`
+
+**Examples**:
+- Backend API development in C#
+- Entity Framework or database operations
+- C# class libraries or services
+- .NET Core/5+ applications
+- C# best practices and patterns
+
+**Important**: Always spawn the appropriate specialized agent using the Task tool with `subagent_type: general-purpose` and provide detailed context about the task. Do not attempt to solve domain-specific expert tasks without consulting the relevant agent first.
+
+## 1. Data Attributes for DOM Elements
+
+For every `div` or HTML element, add a `data-` attribute with a unique and meaningful identifier. This enables quick element location and easier refactoring.
+
+```tsx
+// Instead of:
+<div className="container">...</div>
+
+// Use:
+<div data-article-viewer-container className="container">...</div>
+```
+
+Use kebab-case for the attribute value and make it descriptive of the component's purpose and location. For nested elements, include parent context:
+
+```tsx
+<div data-article-viewer-sidebar>
+  <div data-article-viewer-sidebar-item>...</div>
+  <div data-article-viewer-sidebar-content>...</div>
+</div>
+```
+
+## 2. Universal Component Folder Structure
+
+**Every** tsx component (pages, functional components, UI components, feature modules) must live in its own folder with the same name as the component. This applies universally across the entire codebase.
+
+### Folder Template (Applies to All Components)
 
 ```
-/var/www/kraken/
-├── AGENTS.md                    # Hermes project rules (this file)
-├── CLAUDE.md                    # identical — Claude Code compatibility
-├── .hermes.md                   # Hermes highest-priority context
-├── MythKraken.Backend/          # C#/.NET solution, 5 projects
-└── Dashboard/
-    ├── AGENTS.md                # identical copy of Hermes rules
-    └── claude/                  # repo-tracked skills/agents (see INDEX.md)
+src/[location]/[ComponentName]/
+├── [ComponentName].tsx     # Main component (entry point)
+├── types.ts                # All TypeScript interfaces/types for this component
+├── constants.ts            # Static constants (config values, enum maps, etc.)
+├── hooks/                  # Custom hooks containing business logic
+│   ├── use[ComponentName].ts
+│   └── use[SubLogic].ts
+├── atoms/                  # Atomic/primitive elements (smallest building blocks)
+│   ├── Badge.tsx
+│   └── IconWrapper.tsx
+├── helpers/                # Utility functions (pure functions, no React/hooks)
+│   ├── formatDate.ts
+│   └── validation.ts
+├── ui/                     # Sub-components that are presentational/internal
+│   ├── SubComponent.tsx
+│   └── AnotherSub.tsx
+└── components/             # Child components that are more complex features
+    ├── ChildFeature/
+    │   ├── ChildFeature.tsx
+    │   ├── types.ts
+    │   ├── constants.ts
+    │   ├── hooks/
+    │   ├── atoms/
+    │   ├── helpers/
+    │   ├── ui/
+    │   └── components/
+    └── AnotherChild/
+        └── AnotherChild.tsx
 ```
 
-### Local stack — managed by systemd. **Never start/restart manually.**
+### Layer Types
+
+| Layer | Folder | Purpose | Contains Logic |
+|-------|--------|---------|---------------|
+| Atoms | `atoms/` | Atomic/primitive elements (smallest building blocks: badges, icons, labels) | No |
+| UI | `ui/` | Sub-components that are presentational/internal | No |
+| Components | `components/` | Child feature components with complex logic | No (via hooks) |
+| Hooks | `hooks/` | All business logic (state, effects, callbacks) | Yes |
+| Helpers | `helpers/` | Pure utility functions (no React/hooks) | No |
+| Constants | `constants.ts` | Static values (config, enum maps, defaults) | No |
+| Types | `types.ts` | TypeScript interfaces and type aliases | N/A |
+
+### Rules
+
+1. **One component per folder** - Each component (`.tsx` file) lives in its own folder matching its name
+2. **No flat files** - Never create `.tsx` files directly in `components/`, `pages/`, or `ui/` directories
+3. **Types in parent folder** - All interfaces for a component go in the component's `types.ts`, not in the component file
+4. **Business logic in hooks** - All state, effects, callbacks, and logic go in `hooks/`
+5. **UI layer is pure** - Components in `ui/` folders must be presentational only (no hooks, no state)
+6. **Atoms are the smallest blocks** - Components in `atoms/` are pure primitives (single HTML elements or very simple compositions)
+7. **Helpers are pure functions** - No React imports, no hooks, just utility logic
+8. **Constants are static** - No runtime logic, just configuration values and enum mappings
+9. **Component layer uses hooks** - Components in `components/` folders get logic via hooks from their parent's `hooks/` folder
+10. **Hierarchical structure** - Child components follow the same pattern recursively
+11. **File line limits** - Keep files focused and small:
+    - **TSX files**: Maximum **800 lines**. If a component exceeds this, split it into smaller sub-components or extract logic into hooks/helpers.
+    - **All other files** (`.ts`, `.tsx`, `.css`, etc.): Maximum **300 lines**. If a file exceeds this, split it into multiple focused files (e.g., split `useUser.ts` into `useUserProfile.ts`, `useUserSettings.ts`).
+
+### When to Split a File
+
+When a file approaches the line limit, split by responsibility:
+
+| File Type | Split Criteria |
+|-----------|----------------|
+| `hooks/*.ts` | Split by state domain (e.g., `useUserAuth.ts`, `useUserPreferences.ts` instead of one `useUser.ts`) |
+| `types.ts` | Split into domain-specific type files (e.g., `types/user.ts`, `types/article.ts`) |
+| `constants.ts` | Split by feature or constant category (e.g., `constants/theme.ts`, `constants/config.ts`) |
+| `helpers/*.ts` | Already one function per file — if >300 lines, the function is doing too much — break it down |
+| `tsx` components | Extract presentational sub-components to `ui/` or `components/`, extract logic to `hooks/` |
+
+### Splitting Example
+
+```typescript
+// ❌ BAD: useArticle.ts (450 lines — over limit)
+// Contains: user state, editor state, article data, comments, tags, categories, images, SEO...
+
+// ✅ GOOD: split into focused hooks
+src/pages/Article/hooks/
+├── useArticle.ts           // Article CRUD, loading, error handling (~150 lines)
+├── useArticleEditor.ts     // Editor state, autosave, undo/redo (~200 lines)
+├── useArticleComments.ts   // Comment fetching, posting, moderation (~120 lines)
+├── useArticleTags.ts       // Tag management, autocomplete (~80 lines)
+├── useArticleSEO.ts        // Meta, keywords, readability score (~100 lines)
+└── useArticleImages.ts     // Image upload, gallery, optimization (~140 lines)
+```
+
+```tsx
+// ❌ BAD: ArticleHeader.tsx (950 lines — over limit)
+// Contains: title, author, metadata, actions, toolbar, share buttons, status badge...
+
+// ✅ GOOD: extract into child components
+src/pages/Article/components/ArticleHeader/
+├── ArticleHeader.tsx       // Layout wrapper, composition (~50 lines)
+├── types.ts
+├── hooks/
+│   └── useArticleHeader.ts
+├── atoms/
+│   ├── StatusBadge.tsx     // (~30 lines)
+│   └── ShareButton.tsx     // (~40 lines)
+└── ui/
+    ├── TitleDisplay.tsx     // Title rendering, editing (~80 lines)
+    ├── AuthorMeta.tsx       // Author info, avatar, date (~100 lines)
+    ├── HeaderToolbar.tsx    // Action buttons, dropdowns (~150 lines)
+    └── MetadataBar.tsx     // Tags, category, read time (~120 lines)
+```
+
+### Example: UI Component (GlassCard)
+
+```
+src/components/ui/GlassCard/
+├── GlassCard.tsx           # Main component
+├── types.ts                # GlassCardProps interface
+├── constants.ts            # Animation durations, default class mappings
+├── hooks/                  # (empty if purely presentational)
+├── atoms/                  # Internal atomic elements
+│   └── GlassBorder.tsx
+├── helpers/                # (empty if purely presentational)
+└── components/             # (empty or contains internal sub-components)
+```
+
+```tsx
+// src/components/ui/GlassCard/GlassCard.tsx
+import type { GlassCardProps } from './types';
+
+export function GlassCard({ children, className = '', 'data-testid': testId }: GlassCardProps) {
+  return (
+    <div
+      data-glass-card
+      data-testid={testId}
+      className={`glass-card ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+```
+
+```typescript
+// src/components/ui/GlassCard/types.ts
+export interface GlassCardProps {
+  children: React.ReactNode;
+  className?: string;
+  'data-testid'?: string;
+}
+```
+
+```typescript
+// src/components/ui/GlassCard/constants.ts
+export const GLASS_CARD_ANIMATION_DURATION = 300;
+export const DEFAULT_GLASS_CLASS = 'glass-card-default';
+```
+
+### Example: Page Component (Article)
+
+```
+src/pages/Article/
+├── Article.tsx             # Page component (entry point)
+├── types.ts                # Article, Author, ArticleStatus interfaces
+├── constants.ts            # Article status values, pagination defaults
+├── hooks/
+│   ├── useArticle.ts
+│   └── useArticleEditor.ts
+├── atoms/
+│   ├── ArticleStatusBadge.tsx
+│   └── AuthorAvatar.tsx
+├── helpers/
+│   ├── formatDate.ts
+│   └── articleValidation.ts
+├── ui/
+│   ├── ArticleMeta.tsx
+│   └── ArticleStats.tsx
+└── components/
+    ├── ArticleEditor/
+    │   ├── ArticleEditor.tsx
+    │   ├── types.ts
+    │   ├── constants.ts
+    │   ├── hooks/
+    │   │   └── useArticleEditor.ts
+    │   ├── atoms/
+    │   │   └── EditorToolbarButton.tsx
+    │   ├── helpers/
+    │   │   └── wordCount.ts
+    │   └── ui/
+    │       └── EditorToolbar.tsx
+    └── ArticleHeader/
+        ├── ArticleHeader.tsx
+        ├── types.ts
+        ├── constants.ts
+        ├── hooks/
+        │   └── useArticleHeader.ts
+        ├── atoms/
+        │   └── Title.tsx
+        ├── helpers/
+        │   └── seoScore.ts
+        └── ui/
+            ├── TitleDisplay.tsx
+            └── BackButton.tsx
+```
+
+### Example: Feature Component (DataGrid)
+
+```
+src/components/data-grid/DataGrid/
+├── DataGrid.tsx            # Main component
+├── types.ts
+├── constants.ts            # Column type definitions, default sort orders
+├── hooks/
+│   ├── useDataGrid.ts
+│   └── useDataGridFilters.ts
+├── atoms/
+│   ├── SortIndicator.tsx
+│   └── FilterIcon.tsx
+├── helpers/
+│   ├── columnWidth.ts
+│   └── filterOperators.ts
+├── ui/
+│   ├── DataGridToolbar.tsx
+│   └── DataGridPagination.tsx
+└── components/
+    ├── DataGridTable/
+    │   ├── DataGridTable.tsx
+    │   ├── types.ts
+    │   ├── constants.ts
+    │   ├── hooks/
+    │   │   └── useDataGridTable.ts
+    │   ├── atoms/
+    │   │   └── TableRow.tsx
+    │   ├── helpers/
+    │   │   └── rowSelection.ts
+    │   └── ui/
+    │       └── TableCell.tsx
+    └── DataGridColumnHeader/
+        ├── DataGridColumnHeader.tsx
+        ├── types.ts
+        ├── hooks/
+        │   └── useColumnSort.ts
+        ├── atoms/
+        │   └── SortIcon.tsx
+        └── helpers/
+            └── columnVisibility.ts
+```
+
+### When to Use Each Folder
+
+- **`atoms/`** - Smallest building blocks: Badge, Icon, Label, Button, Avatar. Pure presentational, no hooks.
+- **`ui/`** - Internal sub-components that are presentational but more complex than atoms. May compose multiple atoms.
+- **`components/`** - Child features that have their own business logic, multiple states, or are complex enough to warrant their own folder structure.
+- **`helpers/`** - Pure utility functions: formatting, validation, calculations. No React imports, no hooks.
+- **`constants/`** - Static configuration: enum maps, default values, config objects. No runtime logic.
+
+### Import Patterns
+
+```tsx
+// Imports from same component
+import { type GlassCardProps } from './types';
+import { GLASS_CARD_ANIMATION_DURATION } from './constants';
+import { useGlassCardAnimation } from './hooks';
+import { GlassBorder } from './atoms';
+import { cn } from './helpers';
+
+// Imports from parent
+import { GlassCard } from '@/components/ui/GlassCard';
+import { GlassCardProps } from '@/components/ui/GlassCard/types';
+import { useArticleEditor } from '../../hooks';
+import { ARTICLE_STATUS_LABELS } from '../../constants';
+import { formatDate } from '../../helpers';
+
+// Cross-component imports
+import { GlassCard } from '@/components/ui/GlassCard';
+import { useDataGridFilters } from '@/components/data-grid/DataGrid/hooks';
+```
+
+## 5. Internationalization (i18n) for All Static Text
+
+All static UI text (labels, buttons, messages, placeholders, tooltips) must use i18n. Text from API responses can be displayed directly without translation.
+
+### Translation File Structure
+
+Translations are scoped per feature/page and live in `frontend/src/locales/{namespace}/{lang}.json`:
+
+```
+frontend/src/locales/
+├── common/          # Shared UI elements (buttons, labels, errors)
+│   ├── en.json
+│   ├── pt.json
+│   └── ...
+├── layout/          # Layout components (sidebar, header, footer)
+│   └── ...
+├── article/         # Article page and sub-components
+│   └── ...
+├── chat/            # Chat page
+│   └── ...
+└── [feature]/      # One namespace per feature/page
+    └── ...
+```
+
+### Namespace Scoping Rules
+
+Each component or page gets its own namespace. Map component folders to namespaces:
+
+| Component Location | Namespace | Translation File |
+|-------------------|-----------|-----------------|
+| `@src/pages/Article/` | `article` | `frontend/src/locales/article/{lang}.json` |
+| `@src/pages/ChatPage/` | `chat` | `frontend/src/locales/chat/{lang}.json` |
+| `@src/components/ui/GlassCard/` | `ui` | `frontend/src/locales/ui/{lang}.json` |
+| `@src/components/data-grid/` | `dataGrid` | `frontend/src/locales/dataGrid/{lang}.json` |
+| `@src/layouts/` | `layout` | `frontend/src/locales/layout/{lang}.json` |
+| Shared/common | `common` | `frontend/src/locales/common/{lang}.json` |
+
+**Rule:** Never create a new namespace for a single component. If a component is small and its text is already covered by a parent namespace, use the parent's namespace instead.
+
+### Key Naming Convention
+
+Keys follow a dot-notation hierarchy: `{section}.{subsection}.{element}`
+
+```
+{namespace}.{section}.{subsection}.{element}
+```
+
+- **Namespace prefix** — matches the folder name
+- **Section** — logical group (e.g., `header`, `form`, `errors`, `actions`)
+- **Subsection** — subgroup (optional, for complex forms)
+- **Element** — specific UI element (e.g., `title`, `placeholder`, `saveButton`)
+
+```
+"article.form.title": "Edit Article"
+"article.form.fields.title.placeholder": "Enter article title"
+"article.form.actions.saveButton": "Save"
+"article.form.actions.cancelButton": "Cancel"
+"article.errors.titleRequired": "Title is required"
+```
+
+### How to Use Translations
+
+```tsx
+// Use the useTranslation hook with the namespace
+import { useTranslation } from 'react-i18next';
+
+// In a component that maps to the "article" namespace
+const { t } = useTranslation('article');
+
+// In a shared/common component
+const { t } = useTranslation('common');
+```
+
+### NEVER Show Literal Translation Keys
+
+If a translation key is missing in a language file, the app must never display the raw key (e.g., `"article.form.title"`). Use these safeguards:
+
+1. **Always provide English fallback** — Every key must exist in `en.json`. Other languages fall back to English.
+2. **Register namespace in i18n.ts** — Add new namespaces to `frontend/src/i18n/i18n.ts` so they're loaded at startup:
+   ```typescript
+   // frontend/src/i18n/i18n.ts
+   import enMyFeature from '../locales/myFeature/en.json';
+   import ptMyFeature from '../locales/myFeature/pt.json';
+   // ... other languages
+
+   const resources = {
+     en: { myFeature: enMyFeature },
+     pt: { myFeature: ptMyFeature },
+     // ...
+   };
+   ```
+3. **Prefer explicit keys over fallback** — Don't use `t('key', { defaultValue: '...' })` to bypass missing keys. Add the key to `en.json` instead.
+4. **Test in a non-English language** — Always verify translations render correctly in at least one non-English language before marking a task complete.
+
+### Dynamic Values and Pluralization
+
+```tsx
+// Variables in translations: use {{variableName}} in the JSON
+// JSON: "article.wordCount": "Word count: {{count}}"
+// TSX:
+t('article.wordCount', { count: 150 })
+
+// Pluralization: use i18next count functionality
+// JSON:
+// "article.itemCount_one": "{{count}} item",
+// "article.itemCount_other": "{{count}} items"
+// TSX:
+t('article.itemCount', { count: items.length })
+```
+
+### Shared vs Feature-Specific Text
+
+| Text Type | Location | Example |
+|-----------|----------|---------|
+| Buttons (generic) | `common/` | `"common.buttons.save": "Save"` |
+| Error messages (shared) | `common/` | `"common.errors.required": "This field is required"` |
+| Page-specific labels | `{page}/` | `"article.sidebar.title": "Article Settings"` |
+| Feature-specific messages | `{feature}/` | `"chat.messages.welcome": "Welcome to chat"` |
+| Form placeholders | `{page}/` | `"article.form.title.placeholder": "Enter title..."` |
+| From API response | Direct display | `article.title` (no translation) |
+
+### Translation Workflow
+
+1. Identify all static text in a component (no translation if data comes from API)
+2. Determine the correct namespace (create new only if no existing namespace fits)
+3. Add the key to `en.json` first (English is the source of truth)
+4. Add the key with English fallback to all other language files
+5. Register the namespace in `frontend/src/i18n/i18n.ts` if new
+6. Use `t('namespace.key')` in the component
+7. Test rendering in at least one non-English language
+
+### Example
+
+```tsx
+// ❌ BAD: Hardcoded static text
+<button>Save</button>
+<span>Loading...</span>
+<p>Are you sure you want to delete this item?</p>
+
+// ✅ GOOD: Use i18n
+import { useTranslation } from 'react-i18next';
+
+const { t } = useTranslation('article');
+
+<button>{t('article.form.actions.saveButton')}</button>
+<span>{t('common.status.loading')}</span>
+<p>{t('common.confirmations.deleteItem')}</p>
+```
+
+```json
+// frontend/src/locales/article/en.json
+{
+  "form": {
+    "actions": {
+      "saveButton": "Save",
+      "cancelButton": "Cancel"
+    }
+  }
+}
+
+// frontend/src/locales/common/en.json
+{
+  "status": {
+    "loading": "Loading..."
+  },
+  "confirmations": {
+    "deleteItem": "Are you sure you want to delete this item?"
+  }
+}
+```
+
+## 6. Post-Task Error Checking (Mandatory - Language Agnostic)
+
+After any task that involves file updates, changes, or new file creations:
+
+1. **Identify the language(s)** - Determine what programming language(s) were modified
+2. **Run lint check** - Execute the appropriate linter for each language (e.g., ESLint, RuboCop, Pylint, Clippy, etc.)
+3. **Run type check** - Execute the type checker for the language (e.g., TypeScript `tsc`, Rust `cargo check`, Python type hints, etc.)
+4. **Run build/compile** - Execute the build/compile command to verify no build errors
+5. **Run tests** - Execute the test suite to verify all tests still pass
+6. **Iterate and fix** - If any errors are found, fix them and repeat the checks
+7. **Only mark task complete** - When all lint, type, and build checks pass without errors
+
+**Language-specific examples:**
+- **TypeScript/JavaScript**: `eslint`, `tsc --noEmit`, `npm run build`
+- **Rust**: `cargo clippy`, `cargo check`, `cargo build`
+- **Python**: `pylint`, `mypy`, `python -m py_compile`
+- **Go**: `golangci-lint`, `go vet`, `go build`
+- **Ruby**: `rubocop`, `ruby -c`
+- **Java**: `checkstyle`, `javac`, `mvn compile`
+- **C/C++**: `clang-tidy`, `gcc -Wall`, `make`
+
+**Important:** This applies to all Write, Edit, and file creation operations. Never skip this verification step. Adapt the checks based on the specific language(s) involved in the task.
+
+---
+
+## 7. E2E Testing with Real Backend
+
+### Dev infrastructure (systemd services — do NOT start/restart manually)
+
+The local stack is managed by systemd. Never run `npm run dev`, `dotnet run`, or `cloudflared tunnel` manually — the services already exist:
 
 | Service | Role | Port |
 |---|---|---|
-| `kraken-dashboard.service` | Vite dev server | 5173 |
+| `kraken-dashboard.service` | Vite dev server (Dashboard) | 5173 |
 | `kraken-backend.service` | .NET API (`ASPNETCORE_ENVIRONMENT=Development`) | 5134 |
 | `cloudflared-kraken.service` | Tunnel: `kraken.menustudioai.com` → :5173, `api-kraken-backend.menustudioai.com` → :5134 | — |
 | `storybook.service` | Storybook | 6006 |
-| `cloudflared-storybook.service` | Storybook tunnel | — |
+| `cloudflared-storybook.service` | Tunnel for Storybook | — |
 
-**Forbidden:** `npm run dev`, `dotnet run`, `cloudflared tunnel ...`. Use `systemctl status <name>` and `journalctl -u <name> -n 100 --no-pager` for diagnostics.
+**Mandatory pre-flight before any browser-driven test (Playwright spec OR live `flow-<name>-*` agent)**:
 
-**Pre-flight before any browser-driven test:**
 ```bash
 systemctl is-active kraken-dashboard kraken-backend cloudflared-kraken
-# Must print three "active" lines. If not, stop — do not auto-start anything.
+# Expect three "active" lines. If any is not active, stop and report — do not auto-start anything.
+journalctl -u kraken-backend -n 100 --no-pager      # backend logs
+journalctl -u kraken-dashboard -n 100 --no-pager    # frontend logs
 ```
 
-### Backend dependency rule (cannot be enforced by tooling)
+### MANDATORY manual login for live flow-test agents
 
-- **Core** references nothing.
-- **API** never references **Data** or **Connectors** directly — go via Core interfaces + DI.
-- Only Infra, Data, Connectors reference Core.
+Live test agents generated by `flow-test-builder` (`flow-<name>-validator` / `flow-<name>-auditor`) **must** perform login through the real `/auth/login` UI form using credentials from `.env.e2e`. **Forbidden**:
 
-### Auth / DB / E2E
+- Calling `POST /api/auth/login` directly and then injecting a session cookie.
+- Skipping the login screen by pre-loading a `sid` cookie.
+- Using auth mocks "to save time".
 
-- DB connection string: `MythKraken.Backend/appsettings.Secrets.json` → `ConnectionStrings.default` (default `Server=localhost;Port=3306;Database=krakendb;Uid=root;Pwd=myth`).
-- E2E credentials: `Dashboard/.env.e2e` (gitignored). Keys: `E2E_TEST_EMAIL`, `E2E_TEST_PASSWORD`, `E2E_BASE_URL`, `E2E_FRONTEND_URL`.
-- **`SPRINT_BRANCH`** must be set in `Dashboard/.env` (gitignored). Default: `sprint/may-week1`. `pr-expert` reads this to target the PR base branch. Without it, PR creation aborts.
-- Live flow-test agents (`flow-<name>-validator/auditor`) **must** log in via the real `/auth/login` UI form. Never seed `sid` cookies, never mock `/api/auth/login`.
-- Playwright `.spec.ts` may use `e2e/fixtures/realBackend.fixture.ts` (server-side login + cookie seed).
+Reason: real auth is part of every user-flow. Bugs in the form, post-login redirect, middleware-ready signal, or automatic workspace selection only surface via real login. Also, agent-browser cannot inject `HttpOnly` cookies — UI login is the only functional path.
 
----
+For Playwright `.spec.ts` files in `e2e/`, the `realBackend.fixture` (which calls `POST /api/auth/login` server-side and seeds the cookie) is allowed because that's a fixture for compiled tests, not a live user-simulating agent.
 
-## 4.5 Parallelization model — file-ownership per specialist
+### Real Backend Session Fixture (Playwright .spec.ts only)
 
-In Phase 4, multiple specialists in the same parallel batch are dispatched concurrently. Conflicts are impossible because each owns a strict file slice:
+For E2E tests that need a real authenticated session (not mocked APIs), use the `realBackend.fixture`:
 
-| Specialist | Owns (writes only here) |
-|---|---|
-| `frontend-designer` | The `.tsx` file's **return JSX block** + Tailwind classes |
-| `frontend-react` | The `.tsx` file's **body before return** (thin shell); shared `src/atoms/*Atom.ts` |
-| `frontend-hooks` | `hooks/use*.ts` |
-| `frontend-types` | `types.ts` |
-| `frontend-constants` | `constants.ts` |
-| `frontend-atoms` | `atoms/*.tsx`, `src/components/ui/<X>/<X>.tsx` |
-| `frontend-translator` | `src/locales/<ns>/*.json`, `src/i18n/i18n.ts` |
-| `frontend-storybook` | `*.stories.tsx` |
-| `frontend-endpoints` | `src/api/endpoints.ts` (append-only) |
-| `frontend-websockets` | `src/signalr/*.ts`, hub-event subscribers |
-| `backend-dev` | `Backend/MythKraken.*/**.cs` |
-| `folder-architect` | NONE in execution (pre-flight only) |
-| `frontend-organizator` | NONE in execution (audit + per-batch refactor only, scheduled at end of each phase) |
-| `frontend-data-testid-checker` | Post-write audit only — no source file writes |
+```typescript
+import { test, expect } from './fixtures/realBackend.fixture';
 
-The planner emits per-phase `batches` arrays; the orchestrator dispatches all specialists in a batch via concurrent `Agent(...)` calls in a single message.
-
----
-
-## 5. Phase-state & resume
-
-The orchestrator persists per-plan state under:
-
-```
-/var/www/kraken/Dashboard/claude/orchestrator-state/<plan-slug>/
-├── plan.md
-├── phases.json
-├── state.json
-├── research-context.json
-└── precommit.log
+test('my real backend test', async ({ authenticatedPage, authState }) => {
+  // authenticatedPage has a real sid cookie from POST /api/auth/login
+  // authState has userData, workspaces, sessionId
+});
 ```
 
-This directory is gitignored. State files are workspace-local and survive `/compact` — pick up a paused plan with `/kraken-resume`.
+**Fixture location**: `frontend/e2e/fixtures/realBackend.fixture.ts`
 
-Failure reports (after 3 failed attempts) are written to `Dashboard/claude/reports/` and **are tracked in git** for forensic value.
+**What it does**:
+1. Reads credentials from `.env.e2e` (or `E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD` env vars)
+2. Calls `POST /api/auth/login` against the real backend to get a valid `sid` session cookie
+3. Seeds the browser context with the real `sid` cookie
+4. Fetches user data and workspace list from the real backend
+5. Sets `currentWorkspaceId` in localStorage to the first workspace
 
----
+**Environment setup**: Create `frontend/.env.e2e` (gitignored):
+```
+E2E_TEST_EMAIL=user2@myth.com
+E2E_TEST_PASSWORD=123123
+E2E_BASE_URL=http://localhost:5134
+E2E_FRONTEND_URL=http://localhost:5173
+```
 
-## 6. Hermes profiles — quick reference
+### Seeding Test Users via Database
 
-All profiles are at `~/.hermes/profiles/<name>/`. Each loads its paired skill automatically.
-
-| Profile | Skill |
-|---|---|
-| `mythkraken-orchestrator` | Orchestrates the full pipeline |
-| `backend-dev` | C#/.NET backend |
-| `frontend-react` | React entry-point shell |
-| `frontend-designer` | CSS/Tailwind visual |
-| `frontend-hooks` | Business logic hooks |
-| `frontend-types` | TypeScript interfaces |
-| `frontend-constants` | Runtime constants |
-| `frontend-atoms` | Atomic UI primitives |
-| `frontend-ux` | a11y, keyboard, loading/error/empty |
-| `frontend-translator` | i18n locale files |
-| `frontend-storybook` | Storybook stories |
-| `frontend-endpoints` | Axios API layer |
-| `frontend-websockets` | SignalR real-time |
-| `frontend-first-validator` | Door 1 build gate |
-| `frontend-organizator` | Folder structure audit |
-| `frontend-data-testid-checker` | data-* attribute audit |
-| `test-flow-orchestrator` | Door 2A live browser |
-| `e2e-orchestrator` | Door 2B Playwright replay |
-| `e2e-dev` | New E2E spec |
-| `e2e-plan` | Plan E2E test |
-| `e2e-run` | Run E2E suite |
-| `e2e-explore` | Exploratory QA |
-| `tdd-vitest-planner` | Test plan from phases.json |
-| `tdd-vitest-executor` | RED-GREEN-REFACTOR cycle |
-| `kraken-planner` | plan.md + phases.json |
-| `kraken-researcher` | Context gathering |
-| `kraken-pre-commit-validator` | Door 3 pre-commit |
-| `mythkraken-validator` | Task-done gate |
-| `pr-expert` | Cherry-pick + PR |
-| `dogfood` | Exploratory QA |
-| `spike` | Throwaway experiments |
-| `flow-test-builder` | Generates validator+auditor pairs |
-| `flow-quick-article-validator` | Quick article live validator |
-| `flow-quick-article-auditor` | Quick article auditor |
-| `repomix-updater` | Background pack refresh |
-| `task-ingestion` | External → kanban bridge |
-| `folder-architect` | Atomic design pre-flight |
-| `code-rot-scan` | Dead code scanner |
-| `code-rot-clean` | Dead code cleaner |
-| `requesting-code-review` | Pre-commit review |
-| `systematic-debugging` | 4-phase debug |
-| `python-debugpy` | Python DAP debugging |
-| `node-inspect-debugger` | Node.js debugging |
-| `plan` | Plan mode (no exec) |
-| `writing-plans` | Implementation plans |
-| `subagent-driven-development` | Subagent orchestration |
-| `test-driven-development` | TDD methodology |
-| `github-auth` | GitHub credentials setup |
-| `github-issues` | GitHub issue management |
-| `github-code-review` | PR diffs and comments |
-| `github-pr-workflow` | Full PR lifecycle |
-| `github-repo-management` | Clone/fork/releases |
-| `codebase-inspection` | LOC and metrics analysis |
-| `notion` | Notion API integration |
-| `linear` | Linear project management |
-| `airtable` | Airtable REST API |
-| `google-workspace` | Gmail/Calendar/Drive |
-| `powerpoint` | .pptx automation |
-| `maps` | OpenStreetMap services |
-| `nano-pdf` | Lightweight PDF editing |
-| `ocr-and-documents` | Text extraction from PDFs |
-| `arxiv` | Academic paper discovery |
-| `polymarket` | Prediction market data |
-| `blogwatcher` | RSS/Atom feed monitoring |
-| `llm-wiki` | LLM knowledge base |
-| `research-paper-writing` | Research assistant |
-| `spotify` | Spotify playback control |
-| `youtube-content` | YouTube transcript processing |
-| `gif-search` | GIF search and download |
-| `heartmula` | AI music generation |
-| `songsee` | Audio feature analysis |
-| `huggingface-hub` | HF model/dataset access |
-| `kanban-orchestrator` | Kanban pipeline orchestration |
-| `kanban-worker` | Kanban task execution |
-| `webhook-subscriptions` | Webhook event-driven runs |
-| `agent-browser` | Browser automation |
-| `mythkraken-browser-agent` | MythKraken browser patterns |
-| `browser-validation-agent` | UI state verification |
-| `kraken-database` | MySQL test data |
-| `external-claude-runner` | Spawn Claude CLI sessions |
-| `hermes-agent-skill-authoring` | Create Hermes skills |
-| `kraken-fullsite-qa` | Full 8-hour QA session |
-| `yuanbao` | Yuanbao group messaging |
-
----
-
-## 7. Sync rule
-
-`AGENTS.md` and `CLAUDE.md` are kept identical. When you edit one, copy to the other:
+If no suitable test user exists, use the MySQL connection from `MythKraken.Backend/appsettings.Secrets.json`:
 
 ```bash
-cp /var/www/kraken/AGENTS.md /var/www/kraken/CLAUDE.md
-cp /var/www/kraken/AGENTS.md /var/www/kraken/Dashboard/AGENTS.md
-cp /var/www/kraken/AGENTS.md /var/www/kraken/Dashboard/CLAUDE.md
+# Read connection string from secrets
+# Default: Server=localhost;Port=3306;Database=krakendb;Uid=root;Pwd=myth
+mysql -u root -pmyth krakendb -e "
+  INSERT INTO users (id, email, password_hash, firstname, lastname, access_flags, language)
+  VALUES (UUID(), 'e2e-test@myth.com', '<bcrypt_hash>', 'E2E', 'Test', 18446744073709551615, 'pt-BR');
+"
 ```
+
+**How to find the connection string**: Read `MythKraken.Backend/appsettings.Secrets.json` → `ConnectionStrings.default`. Parse `Uid` and `Pwd` for MySQL auth.
+
+**How to find or create a test user**:
+1. Check existing users: `mysql -u root -pmyth krakendb -e "SELECT id, email, firstname FROM users LIMIT 10;"`
+2. Create one if needed via `POST /api/auth/register` or direct DB insert
+3. Ensure the user has workspace membership: `INSERT INTO workspace_members ...`
+
+### E2E Test Conventions
+
+- Use `realBackend.fixture` for tests that need real API responses (workspace guard, auth flows, data integrity)
+- Use `base.fixture` with `mockApi` for isolated UI tests (no backend dependency)
+- All E2E tests go in `frontend/e2e/*.spec.ts`
+- Test fixtures are exported from `frontend/e2e/fixtures/index.ts`
+- Capture and verify console logs to confirm guard/middleware execution paths
+
+---
+
+## 8. MythKraken Backend Rules (C#/.NET)
+
+When working in the `MythKraken.Backend/` directory, also apply the following rules:
+
+### Stack & Projects
+
+- **Stack**: .NET 8, ASP.NET Core Web API, MySQL 8+ (RepoDb), SignalR, session-based auth with 2FA, OpenAI (GPT-4) / Cerebras
+- **Solution (5 projects)**:
+
+| Project | Role |
+|---------|------|
+| MythKraken.API | Presentation – controllers, hubs, middleware |
+| MythKraken.Core | Domain – entities, interfaces, enums, no external deps |
+| MythKraken.Data | Data access – repositories, migrations |
+| MythKraken.Infra | Infrastructure – services, implementations |
+| MythKraken.Connectors | External API clients (OpenAI, Serper, ScrapingBee, etc.) |
+
+### Architecture – Layer Boundaries
+
+- **Entities, interfaces, enums, DTOs** → MythKraken.Core (Models/, Interfaces/, Enums/)
+- **Repository implementations** → MythKraken.Data (Repositories/, Repositories/Auth/, Repositories/ACL/)
+- **Service implementations** → MythKraken.Infra (Services/, Tools/, Log/, Media/)
+- **External API clients** → MythKraken.Connectors (one folder per connector)
+- **Endpoints, hubs, middleware** → MythKraken.API (Controllers/, Hubs/, Middleware/)
+
+**Dependency rules:**
+- Core must not reference API, Data, Infra, or Connectors.
+- API must not reference Data or Connectors directly for business types; use Core interfaces and DI.
+- Only Infra, Data, and Connectors reference Core.
+
+### C# Standards
+
+- **Async**: Suffix async methods with `Async` (e.g. `GetByIdAsync`); prefer `ValueTask` when appropriate; avoid `async void` except for event handlers.
+- **Nullability**: Use nullable reference types and `?`; avoid `#nullable disable` in new code.
+- **Naming**: PascalCase for public members; interfaces with `I` prefix (e.g. `IAskAI`); DTOs with suffixes (Request, Response, Options, Model).
+- **Error handling**: Do not swallow exceptions; log and rethrow or return a typed result.
+
+### API Controllers
+
+- Use `[ApiController]` and `[Route("api/[controller]")]`.
+- Use `[RequireWorkspaceFlag(WorkspaceRoleFlags.*)]` for workspace-scoped actions.
+- Use dedicated request/response models (Core.Models.Requests, Core.Models.Responses); do not expose entities as API contracts.
+- Return `IActionResult` / `ActionResult<T>` with correct status codes; use `Ok()`, `Created()`, `BadRequest()`, `NotFound()`, `Unauthorized()`, `Forbid()`.
+
+### Data Layer
+
+- Use RepoDb for MySQL access (configured in DBManager via `UseMySql`).
+- DBManager reads ConnectionStrings from IConfiguration; use `GetConnectionString(name)`.
+- **Migrations**: `MythKraken.Data/migrations/` — `inst.sql` (initial), then `NNN_Description.sql`. Migrations run automatically on startup via MigrationManager. Do not change `inst.sql` arbitrarily.
+- Repository interface in Core; implementation in Data/Repositories/.
+
+### Connectors
+
+- Pattern per connector: `*Client.cs` (HTTP client), `*Options.cs` (config from appsettings), `*Request.cs` / `*Response.cs` / `*Models.cs` for DTOs.
+- Use `IOptions`/`IOptionsSnapshot` for configuration; do not hardcode API keys.
+- Contract (e.g. `IAskAI`, `IScraper`) lives in Core; implementation in MythKraken.Connectors.
+- **Existing connectors**: OpenAI, Cerebras, Serper, SearchAPI, SemRush, DataForSEO, ScrapingBee, BraveSearch, DepositPhotos, GoogleNaturalLanguage, Kernel, Recaptcha, DiscoverSnoop.
+
+### Testing
+
+- Use separate test projects (e.g. MythKraken.API.Tests) or `*.Tests/` folders; match the project under test.
+- Test method names: descriptive (e.g. `MethodName_Scenario_ExpectedBehavior` or Given/When/Then).
+- Prefer mocking Core interfaces (repositories, services); avoid duplicating business logic in tests.
+- Integration tests: use dedicated config (e.g. `appsettings.Test.json`) and never point to production data.
+
+### Post-Task Error Checking (C#/.NET)
+
+After any backend task:
+1. Run `dotnet build` to verify compilation
+2. Run `dotnet test` to verify all tests pass
+3. Iterate and fix any errors before marking complete
+
+### E2E Testing with Real Backend
+
+**Real Backend Session Fixture**: `frontend/e2e/fixtures/realBackend.fixture.ts`
+
+- Authenticates via `POST /api/auth/login` to get a real `sid` session cookie
+- Seeds browser context with real cookies, fetches user data and workspace list
+- Credentials loaded from `frontend/.env.e2e` (gitignored) or `E2E_TEST_EMAIL`/`E2E_TEST_PASSWORD` env vars
+- Use for E2E tests that need real API responses, not mocked endpoints
+
+```typescript
+import { test, expect } from './fixtures/realBackend.fixture';
+test('real backend test', async ({ authenticatedPage, authState }) => { ... });
+```
+
+**Seeding Test Users**: Use MySQL connection from `MythKraken.Backend/appsettings.Secrets.json` (`ConnectionStrings.default`):
+- Default: `Server=localhost;Port=3306;Database=krakendb;Uid=root;Pwd=myth`
+- Check users: `mysql -u root -pmyth krakendb -e "SELECT id, email FROM users;"`
+- Create user via `POST /api/auth/register` or direct DB insert if needed
