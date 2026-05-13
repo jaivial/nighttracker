@@ -12,3 +12,9 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# qabot fixer worktrees (created on demand by qabot-fixer.service)
+.qabot-worktrees/
+
+# Kronos-Pipeline — migrated to qabot/python/kronos_*
+Kronos-Pipeline/
