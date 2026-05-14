@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "wide-researcher": {
+      "command": "node",
+      "args": [
+        "/root/.npm/_npx/9104c5b2eb35fd72/node_modules/wide-researcher/bin/wide-researcher-mcp.js",
+        "--project-config",
+        "/var/www/kraken/.wide-researcher/config.json"
+      ],
+      "env": {
+        "PYTHON_BIN": "/root/.wide-researcher/venv/bin/python"
+      }
+    },
+    "kronos-pipeline": {
+      "command": "python3",
+      "args": [
+        "/var/www/kraken/Kronos-Pipeline/python/kronos_pipeline_mcp.py"
+      ],
+      "env": {}
+    }
+  }
+}
